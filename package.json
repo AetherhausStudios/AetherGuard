@@ -1,0 +1,13 @@
+{
+  "name": "aetherguard-backend",
+  "version": "1.0.0",
+  "description": "AetherGuard key validation and alert backend",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
