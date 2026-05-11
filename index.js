@@ -327,6 +327,95 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── Vault Transfer System ──────────────────────────────────────────────────
+
+  function loadTransfers() { return loadJSON('transfers.json', {}); }
+  function saveTransfers(d) { saveJSON('transfers.json', d); }
+  function loadEmailAccounts() { return loadJSON('accounts.json', {}); }
+  function saveEmailAccounts(d) { saveJSON('accounts.json', d); }
+
+  if (path_ === '/vault/register-email' && req.method === 'POST') {
+    if (!authCheck(req, res)) return;
+    const body = await parseBody(req);
+    const { key, email } = body;
+    if (!key || !email) { respond(res, 400, { error: 'key and email required.' }); return; }
+    const validity = isKeyValid(key);
+    if (!validity.valid) { respond(res, 400, { error: 'Invalid key.' }); return; }
+    if (validity.type === 'master' || validity.type === 'tester') {
+      respond(res, 200, { ok: true, exempt: true }); return;
+    }
+    const accts = loadEmailAccounts();
+    accts[key] = { email: email.toLowerCase().trim(), registeredAt: new Date().toISOString() };
+    saveEmailAccounts(accts);
+    respond(res, 200, { ok: true });
+    return;
+  }
+
+  if (path_ === '/vault/transfer/create' && req.method === 'POST') {
+    if (!authCheck(req, res)) return;
+    const body = await parseBody(req);
+    const { key, fingerprint } = body;
+    if (!key || !fingerprint) { respond(res, 400, { error: 'key and fingerprint required.' }); return; }
+    const validity = isKeyValid(key);
+    if (!validity.valid) { respond(res, 400, { error: 'Invalid key.' }); return; }
+    const trusted = validity.type === 'master' || validity.type === 'tester';
+    if (!trusted) {
+      const accts = loadEmailAccounts();
+      if (!accts[key]) {
+        respond(res, 400, { error: 'Register your email in Settings before exporting.', requiresRegistration: true });
+        return;
+      }
+    }
+    const token     = crypto.randomUUID() + '-' + crypto.randomBytes(8).toString('hex');
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+    const transfers = loadTransfers();
+    transfers[token] = { originKey: key, originType: validity.type, fingerprint, expiresAt, used: false, burned: false, createdAt: new Date().toISOString() };
+    saveTransfers(transfers);
+    console.log(`⊹ Transfer token created — expires ${expiresAt}`);
+    respond(res, 200, { token, expiresAt });
+    return;
+  }
+
+  if (path_ === '/vault/transfer/validate' && req.method === 'POST') {
+    if (!authCheck(req, res)) return;
+    const body = await parseBody(req);
+    const { token, destKey, destFingerprint } = body;
+    if (!token || !destKey || !destFingerprint) { respond(res, 400, { error: 'token, destKey, destFingerprint required.' }); return; }
+    const transfers = loadTransfers();
+    const transfer  = transfers[token];
+
+    function burnAndReject(reason) {
+      if (transfers[token]) { transfers[token].burned = true; saveTransfers(transfers); }
+      respond(res, 200, { valid: false, reason });
+    }
+
+    if (!transfer)         return burnAndReject('Invalid or expired transfer file.');
+    if (transfer.burned)   return burnAndReject('This transfer file has already been invalidated.');
+    if (transfer.used)     { transfers[token].burned = true; saveTransfers(transfers); return burnAndReject('This transfer file has already been imported.'); }
+    if (new Date() > new Date(transfer.expiresAt)) return burnAndReject('This transfer file has expired (24-hour limit).');
+
+    const destValidity = isKeyValid(destKey);
+    if (!destValidity.valid) return burnAndReject('Destination license key is invalid.');
+
+    const originTrusted = transfer.originType === 'master' || transfer.originType === 'tester';
+    const destTrusted   = destValidity.type   === 'master' || destValidity.type   === 'tester';
+
+    if (!originTrusted || !destTrusted) {
+      const accts        = loadEmailAccounts();
+      const originEmail  = accts[transfer.originKey]?.email;
+      const destEmail    = accts[destKey]?.email;
+      if (!originEmail || !destEmail || originEmail !== destEmail) {
+        return burnAndReject('License keys are not registered to the same account.');
+      }
+    }
+
+    transfers[token].used = true; transfers[token].destKey = destKey; transfers[token].importedAt = new Date().toISOString();
+    saveTransfers(transfers);
+    console.log(`⊹ Transfer validated successfully`);
+    respond(res, 200, { valid: true, originType: transfer.originType });
+    return;
+  }
+
   // ── Alerts: get ──
   if (path_ === '/alerts' && req.method === 'GET') {
     if (!authCheck(req, res)) return;
